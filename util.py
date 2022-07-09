@@ -107,6 +107,7 @@ class Eviction_Scraper:
             parties_table = self.driver.find_element('xpath', '/html/body/div[1]/table/tbody/tr[1]/td[2]/form[4]')
             parties_table.click()
 
+            # scrape case data and add it to the dictionary
             self.eviction_cases["case_number"].append(None) 
             self.eviction_cases["court"] 
             self.eviction_cases["case_caption"] 
