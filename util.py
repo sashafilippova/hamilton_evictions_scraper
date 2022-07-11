@@ -4,8 +4,9 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.chrome.options import Options 
 from selenium.webdriver.support.ui import Select    # for drop-down menu
 from selenium.webdriver.support.ui import WebDriverWait
-from bs4 import BeautifulSoup
+#from bs4 import BeautifulSoup
 import time
+import pandas as pd
 
 def scrape_court_evictions_data(start_date = "06/06/2022", end_date = "06/10/2022"):
     """
@@ -62,19 +63,18 @@ class Eviction_Scraper:
         self.end_date = end_date
 
         self.eviction_cases = {
-                "case_number": [], "court": [], "case_caption": [], "judge": [], 
-                "filed_date": [], "case_type": [], "amount": [], "disposition": [], 
-                "plaintiff_name": [], "plaintiff_address": [], "defendant_name": [], 
-                "defendant_address": [], "court_id": []}
+                "CASE NUMBER": [], "COURT": [], "CASE CAPTION": [], "JUDGE": [], 
+                "FILED DATE": [], "CASE TYPE": [], "AMOUNT": [], "DISPOSITION": [], 
+                "PLAINTIFF NAME": [], "PLAINTIFF ADDRESS": [], "DEFENDANT_ATTORNEY": [],
+                "DEFENDANT NAME": [], "DEFENDANT ADDRESS": [], "PLAINTIFF_ATTORNEY": []}
 
         # Initialize a Chrome webdriver and navigate to the starting webpage 
         chrome_options = Options()
-        #chrome_options.add_argument("--headless")
+        chrome_options.add_argument("--headless")
 
         self.driver = webdriver.Chrome(webdriver_location, options=chrome_options)
         self.driver.get("https://www.courtclerk.org/records-search/municipal-civil-listing-by-classification/")
         
-
 
     def run_scraper(self):
         """
@@ -85,8 +85,7 @@ class Eviction_Scraper:
         self.__process_search_webpage()
 
         # Show all records on one page 
-        all_rows = self.driver.find_element("xpath", "/html/body/div[1]/div[3]/button")
-        all_rows.click()
+        self.driver.find_element("xpath", "/html/body/div[1]/div[3]/button").click()
 
         search_tab_handle = self.driver.current_window_handle
 
@@ -97,54 +96,112 @@ class Eviction_Scraper:
         # td[5] specifies to use case summary, not case documents link
         records_xpath_list = self.driver.find_elements('xpath', "//td[5]/form")
 
-        for record in records_xpath_list[:1]:
+        for record in records_xpath_list[:10]:
+            
             record.click()
-
+            
             # switch focus to the newly open tab to scrape data
             self.driver.switch_to.window(self.driver.window_handles[1])
 
             # open parties table with plaintiff and defendant info
-            parties_table = self.driver.find_element('xpath', '/html/body/div[1]/table/tbody/tr[1]/td[2]/form[4]')
-            parties_table.click()
+            self.driver.find_element('xpath', '/html/body/div[1]/table/tbody/tr[1]/td[2]/form[4]').click()
 
-            # scrape case data and add it to the dictionary
-            self.eviction_cases["case_number"].append(None) 
-            self.eviction_cases["court"] 
-            self.eviction_cases["case_caption"] 
-            self.eviction_cases["judge"] 
-            self.eviction_cases["filed_date"] 
-            self.eviction_cases["case_type"] 
-            self.eviction_cases["amount"]
-            self.eviction_cases["disposition"]
-            self.eviction_cases["plaintiff_name"]
-            self.eviction_cases["plaintiff_address"]
-            self.eviction_cases["defendant_name"]
-            self.eviction_cases["defendant_address"]
-            self.eviction_cases["court_id"]
-
-            # close this tab to return to the main tab with all records
+            # get a list of all rows containing data to be scraped 
+            case_summary_table_rows = self.driver.find_elements('xpath', '//*[@id="case_summary_table"]/tbody/tr')
+            party_info_table_rows = self.driver.find_elements('xpath', '//*[@id="party_info_table"]/tbody/tr')
+            
+            # process case summary table & party contact info table rows 
+            self.__extract_summary_case_data(case_summary_table_rows)
+            self.__extract_party_info_data(party_info_table_rows)
+            
+            # close this tab to return to the main tab with all records. 
+            # shift driver focus on the main page with all records 
             self.driver.close()
+            self.driver.switch_to.window(search_tab_handle)
 
-            time.sleep(1)
+            time.sleep(1)      
 
-        
-        
+
+        self.pd_df = pd.DataFrame.from_dict(self.eviction_cases)  
+
         return self.driver
 
 
     def __process_search_webpage(self):
 
         # Use selenium.webdriver.support.ui.Select that we imported above to grab the Select element
-        dropdown = Select(self.driver.find_element("name", "ccode"))
-        dropdown.select_by_value("G")
+        Select(self.driver.find_element("name", "ccode")).select_by_value("G")
 
-        beg_date = self.driver.find_element("xpath", "/html/body/div[1]/div/div[2]/form/input[1]")
-        final_date = self.driver.find_element("xpath", "/html/body/div[1]/div/div[2]/form/input[2]")
+        beg_date = self.driver.find_element('name', 'begdate')
+        final_date = self.driver.find_element('name','enddate')
 
         # Then we'll fake typing into it
         beg_date.send_keys(self.start_date)
         final_date.send_keys(self.end_date)
 
         # Now we can grab the search button and click it
-        search_button = self.driver.find_element("xpath", "/html/body/div[1]/div/div[2]/form/input[4]")
-        search_button.click()
+        self.driver.find_element("xpath", "/html/body/div[1]/div/div[2]/form/input[4]").click()
+
+    
+    def __extract_summary_case_data(self, case_summary_table_rows):
+        """
+        Takes in a list of case summary tags, unpacks them and adds case summary info
+        into dictionary containing court records.  
+
+        Inputs:
+        case_summary_table_rows (lst): list of case_summary_table tags 
+          where each tag represents one row
+        """
+        case_summary_dict = dict()
+
+        for row in case_summary_table_rows: 
+            # convert tag into string, apply upper case, and split string by ":"
+            # example of row variable below: 'CASE NUMBER', 'A1111111'
+            field_name, field_value = row.text.upper().split(":")
+
+            # add field_name and field_value to dict. method strip() removes blank spaces
+            # in the beginning and in the end of a string
+            case_summary_dict[field_name.strip()] = field_value.strip()
+
+        if "DISPOSITION" not in case_summary_dict:
+            case_summary_dict['DISPOSITION'] = ""
+
+
+        for key, val in case_summary_dict.items():
+            self.eviction_cases[key].append(val)
+
+
+    def __extract_party_info_data(self, party_info_table_rows):
+        """
+        Takes in a list of party contact info table tags, unpacks them 
+        and adds them into dictionary containing court records.  
+
+        Inputs:
+        party_info_table_rows (lst): list of party_info_table tags 
+          where each tag represents one column
+        """
+        for row in party_info_table_rows:
+            # put row fields in a list row_fields
+            row_fields = [val.text.replace('\n', '') for val in \
+                row.find_elements('xpath', '*')]
+            party = row_fields[2]
+            
+            if party == 'P 1':
+                self.eviction_cases["PLAINTIFF NAME"].append(row_fields[0])
+                self.eviction_cases["PLAINTIFF ADDRESS"].append(row_fields[1])
+                
+                # check whether plaintiff has attorney
+                if 3 in range(len(row_fields)):
+                    self.eviction_cases["PLAINTIFF_ATTORNEY"].append(row_fields[3])
+                else:
+                    self.eviction_cases["PLAINTIFF_ATTORNEY"].append("")
+
+            elif party == 'D 1':
+                self.eviction_cases["DEFENDANT NAME"].append(row_fields[0])
+                self.eviction_cases["DEFENDANT ADDRESS"].append(row_fields[1])
+
+                # check whether defendant has an attorney
+                if 3 in range(len(row_fields)):
+                    self.eviction_cases["DEFENDANT_ATTORNEY"].append(row_fields[3])
+                else:
+                    self.eviction_cases["DEFENDANT_ATTORNEY"].append("")
