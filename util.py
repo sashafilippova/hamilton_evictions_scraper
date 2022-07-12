@@ -1,4 +1,6 @@
 # imports
+import sys
+
 from typing_extensions import final
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options 
@@ -9,19 +11,37 @@ from datetime import datetime as dt, timedelta as tdelta
 import pandas as pd
 import math
 
+_EVICTION_CASES = {
+                "CASE NUMBER": [], "COURT": [], "CASE CAPTION": [], "JUDGE": [], 
+                "FILED DATE": [], "CASE TYPE": [], "AMOUNT": [], "DISPOSITION": [], 
+                "PLAINTIFF NAME": [], "PLAINTIFF ADDRESS": [], "DEFENDANT_ATTORNEY": [],
+                "DEFENDANT NAME": [], "DEFENDANT ADDRESS": [], "PLAINTIFF_ATTORNEY": []}
 
-##############################
+_KEYS_LIST = [key for key in _EVICTION_CASES.keys()]
 
-def run_eviction_scraper(start_date, end_date, evictions_csv_path):
 
-    previosly_scraped_cases = pd.read_csv(evictions_csv_path, parse_dates=['FILED DATE', 'LAST_UPDATED'])
-    cases_to_check = previosly_scraped_cases[
-        previosly_scraped_cases.DISPOSITION.isnull()]['CASE NUMBER'].to_list()
+def run_eviction_scraper(evictions_csv_path = None, start_date = "06062022", end_date = "06102022",
+                            webdriver_location = "/Users/oleksandrafilippova/Downloads/chromedriver"):
+    """
+    Scrapes new eviction cases from the website. Updates cases with missing disposition.
     
-    most_recent_filing_date = previosly_scraped_cases['FILED DATE'].max().date()
+    Inputs:
+      evictions_csv_path (str)
+      start_date (str): format mmddyyyy
+      end_date (str): format mmddyyyy
+      webdriver_location (str): location of Chrome webdriver on the local machine.
+    """
+
+    if evictions_csv_path is not None:
+        previosly_scraped_cases = pd.read_csv(evictions_csv_path, parse_dates=['FILED DATE', 'LAST_UPDATED'])
+        cases_to_check = previosly_scraped_cases[
+        previosly_scraped_cases.DISPOSITION.isnull()]['CASE NUMBER'].to_list()
+        most_recent_filing_date = previosly_scraped_cases['FILED DATE'].max().date()
     
     return previosly_scraped_cases, cases_to_check
 
+    # initiate class
+    eviction_scraper = Eviction_Scraper(start_date, end_date, webdriver_location)
 
 ################ EVICTION SCRAPER CLASS ##############################
 
@@ -34,11 +54,7 @@ class Eviction_Scraper:
         self.end_date = end_date
         self.lst_time_periods = self.__date_converter()
 
-        self.eviction_cases = {
-                "CASE NUMBER": [], "COURT": [], "CASE CAPTION": [], "JUDGE": [], 
-                "FILED DATE": [], "CASE TYPE": [], "AMOUNT": [], "DISPOSITION": [], 
-                "PLAINTIFF NAME": [], "PLAINTIFF ADDRESS": [], "DEFENDANT_ATTORNEY": [],
-                "DEFENDANT NAME": [], "DEFENDANT ADDRESS": [], "PLAINTIFF_ATTORNEY": []}
+        self.eviction_cases = _EVICTION_CASES
 
         # Initialize a Chrome webdriver and navigate to the starting webpage 
         chrome_options = Options()
@@ -60,7 +76,6 @@ class Eviction_Scraper:
             # Show all records on one page 
             self.driver.find_element("xpath", "/html/body/div[1]/div[3]/button").click() 
             self.scrape_one_period()
-
             self.driver.back()
         
         self.driver.quit()
@@ -70,8 +85,9 @@ class Eviction_Scraper:
 
         return df
 
-
-#################### UTILITY METHODS #############################
+###############################################################################################
+################################ UTILITY METHODS ##############################################
+###############################################################################################
 
     def __date_converter(self, max_period = 7):
         """
@@ -116,7 +132,10 @@ class Eviction_Scraper:
         # td[5] specifies to use case summary, not case documents link
         records_xpath_list = self.driver.find_elements('xpath', "//td[5]/form")
 
-        for record in records_xpath_list[:30]:
+        self.local_records = None
+        self.local_records = {key: [None] * len(records_xpath_list) for key in _KEYS_LIST}
+
+        for i, record in enumerate(records_xpath_list[:7]):
             record.click()
             
             # switch focus to the newly open tab to scrape data
@@ -130,15 +149,19 @@ class Eviction_Scraper:
             party_info_table_rows = self.driver.find_elements('xpath', '//*[@id="party_info_table"]/tbody/tr')
             
             # process case summary table & party contact info table rows 
-            self.__extract_summary_case_data(case_summary_table_rows)
-            self.__extract_party_info_data(party_info_table_rows)
+            self.__extract_summary_case_data(case_summary_table_rows, i)
+            self.__extract_party_info_data(party_info_table_rows, i)
             
             # close this tab to return to the main tab with all records. 
             # shift driver focus on the main page with all records 
             self.driver.close()
             self.driver.switch_to.window(search_tab_handle)
 
-            time.sleep(1)     
+            time.sleep(1) 
+
+        #add records to the main eviction file
+        for key, value in self.local_records.items():
+                self.eviction_cases[key] += value 
 
 
     def __process_search_webpage(self, start, end):
@@ -163,11 +186,11 @@ class Eviction_Scraper:
         final_date.clear()
         final_date.send_keys(end)
 
-        # Now we can grab the search button and click it
+        # Now we can grab the search button and click on it
         self.driver.find_element("xpath", "/html/body/div[1]/div/div[2]/form/input[4]").click()
 
     
-    def __extract_summary_case_data(self, case_summary_table_rows):
+    def __extract_summary_case_data(self, case_summary_table_rows, i):
         """
         Takes in a list of case summary tags, unpacks them and adds case summary info
         into dictionary containing court records.  
@@ -187,15 +210,16 @@ class Eviction_Scraper:
             # in the beginning and in the end of a string
             case_summary_dict[field_name.strip()] = field_value.strip()
 
-        if "DISPOSITION" not in case_summary_dict:
-            case_summary_dict['DISPOSITION'] = ""
+        ######### MAY REMOVE LATER IF USING LOCAL LIST
+        #if "DISPOSITION" not in case_summary_dict:
+            #case_summary_dict['DISPOSITION'] = ""
 
 
         for key, val in case_summary_dict.items():
-            self.eviction_cases[key].append(val)
+            self.local_records[key][i] = val 
+        
 
-
-    def __extract_party_info_data(self, party_info_table_rows):
+    def __extract_party_info_data(self, party_info_table_rows, i):
         """
         Takes in a list of party contact info table tags, unpacks them 
         and adds them into dictionary containing court records.  
@@ -204,6 +228,9 @@ class Eviction_Scraper:
         party_info_table_rows (lst): list of party_info_table tags 
           where each tag represents one column
         """
+        num_parties = 0
+        party_info_dict = dict()
+
         for row in party_info_table_rows:
             # put row fields in a list row_fields
             row_fields = [val.text.replace('\n', '') for val in \
@@ -211,25 +238,31 @@ class Eviction_Scraper:
             party = row_fields[2]
             
             if party == 'P 1':
-                self.eviction_cases["PLAINTIFF NAME"].append(row_fields[0])
-                self.eviction_cases["PLAINTIFF ADDRESS"].append(row_fields[1])
+                party_info_dict["PLAINTIFF NAME"] = row_fields[0]
+                party_info_dict["PLAINTIFF ADDRESS"] = row_fields[1]
                 
                 # check whether plaintiff has attorney
                 if 3 in range(len(row_fields)):
-                    self.eviction_cases["PLAINTIFF_ATTORNEY"].append(row_fields[3])
-                else:
-                    self.eviction_cases["PLAINTIFF_ATTORNEY"].append("")
+                    party_info_dict["PLAINTIFF_ATTORNEY"] = row_fields[3]
 
-            elif party == 'D 1':
-                self.eviction_cases["DEFENDANT NAME"].append(row_fields[0])
-                self.eviction_cases["DEFENDANT ADDRESS"].append(row_fields[1])
+            elif party == 'D 1' or ('D' in party and num_parties < 1):
+                num_parties += 1
+                party_info_dict["DEFENDANT NAME"] = row_fields[0]
+                party_info_dict["DEFENDANT ADDRESS"] = row_fields[1]
 
                 # check whether defendant has an attorney
                 if 3 in range(len(row_fields)):
-                    self.eviction_cases["DEFENDANT_ATTORNEY"].append(row_fields[3])
-                else:
-                    self.eviction_cases["DEFENDANT_ATTORNEY"].append("")
+                    party_info_dict["DEFENDANT_ATTORNEY"] = row_fields[3]
 
+        for key, val in party_info_dict.items():
+            self.local_records[key][i] = val 
+                
 
+# should be able to pass in start date (optional), end date (optional), path to csv if exists (optional),
+# webdriver location
 if __name__ == '__main__':
-    pass 
+    if len(sys.argv) >= 2:
+        cities = sys.argv[1:]
+        run_eviction_scraper(cities)
+    else:
+        run_eviction_scraper()
