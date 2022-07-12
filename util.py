@@ -1,12 +1,13 @@
 # imports
 from selenium import webdriver
-from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.chrome.options import Options 
 from selenium.webdriver.support.ui import Select    # for drop-down menu
-from selenium.webdriver.support.ui import WebDriverWait
+
 #from bs4 import BeautifulSoup
 import time
+from datetime import datetime as dt, timedelta as tdelta
 import pandas as pd
+import math
 
 def scrape_court_evictions_data(start_date = "06/06/2022", end_date = "06/10/2022"):
     """
@@ -70,11 +71,46 @@ class Eviction_Scraper:
 
         # Initialize a Chrome webdriver and navigate to the starting webpage 
         chrome_options = Options()
-        chrome_options.add_argument("--headless")
+        #chrome_options.add_argument("--headless")
 
         self.driver = webdriver.Chrome(webdriver_location, options=chrome_options)
         self.driver.get("https://www.courtclerk.org/records-search/municipal-civil-listing-by-classification/")
         
+
+    def __date_converter(self, max_period = 7):
+        """
+        The court website limits search of records to up to 7 days. This function
+        breaks a given time period into several, smaller time periods containing up to max_period days.
+
+        Inputs:
+          start_date (str): format should be mmddyyyy
+          end_date (str): format should be mmddyyyy
+
+        Returns a list of lists where each inner list represents a 
+        """
+        # convert dates
+        start_date = dt.strptime(self.start_date,"%m%d%Y").date()
+        end_date = dt.strptime(self.end_date, "%m%d%Y").date()
+
+        # check that start date is not before end date
+        assert start_date <= end_date
+
+        number_batches = math.ceil((end_date  - start_date).days / max_period)
+        end = start_date + tdelta(days = max_period)
+
+        # add to the list the first period
+        lst_periods = [[start_date.strftime("%m/%d/%Y"), end.strftime("%m/%d/%Y")]]
+
+        # add more periods to the list
+        for _ in range(number_batches - 1):
+            start = end + tdelta(days = 1)
+            end = start + tdelta(days = max_period)
+            lst_periods.append([start.strftime("%m/%d/%Y"), end.strftime("%m/%d/%Y")])
+
+        lst_periods[-1][1] = end_date.strftime("%m/%d/%Y")
+
+        return lst_periods
+
 
     def run_scraper(self):
         """
@@ -96,7 +132,7 @@ class Eviction_Scraper:
         # td[5] specifies to use case summary, not case documents link
         records_xpath_list = self.driver.find_elements('xpath', "//td[5]/form")
 
-        for record in records_xpath_list[:10]:
+        for record in records_xpath_list[:5]:
             
             record.click()
             
@@ -121,8 +157,11 @@ class Eviction_Scraper:
 
             time.sleep(1)      
 
-
+        ###### NEED TO MOVE THIS ITEM UNDER MAIN FUNCTION ##########
         self.pd_df = pd.DataFrame.from_dict(self.eviction_cases)  
+
+        # return to the search page
+        self.driver.back()
 
         return self.driver
 
