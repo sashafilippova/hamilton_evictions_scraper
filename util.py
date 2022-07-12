@@ -1,67 +1,38 @@
 # imports
+from typing_extensions import final
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options 
 from selenium.webdriver.support.ui import Select    # for drop-down menu
 
-#from bs4 import BeautifulSoup
 import time
 from datetime import datetime as dt, timedelta as tdelta
 import pandas as pd
 import math
 
-def scrape_court_evictions_data(start_date = "06/06/2022", end_date = "06/10/2022"):
-    """
-    Main function that scrapes eviction court cases from the Hamilton County
-    Clerk of Courts website, using "Selenium" and "Beautiful Soup" packages: 
-    https://www.courtclerk.org/records-search/municipal-civil-listing-by-classification/.
-    The result is saved as a csv file.
 
-    Inputs:
-      start_date (str): beginning date from which cases should be scraped
-      end_date (str): end date 
-    """
+##############################
 
-    chrome_options = Options()
-    #chrome_options.add_argument("--headless")
+def run_eviction_scraper(start_date, end_date, evictions_csv_path):
 
-    # Initialize a Chrome webdriver
-    driver = webdriver.Chrome("/Users/oleksandrafilippova/Downloads/chromedriver", options=chrome_options)
-    driver.get("https://www.courtclerk.org/records-search/municipal-civil-listing-by-classification/")
-
-    # Use selenium.webdriver.support.ui.Select that we imported above to grab the Select element
-    dropdown = Select(driver.find_element("xpath", "/html/body/div[1]/div/div[2]/form/select"))
-    dropdown.select_by_value("G")
-
-    beg_date = driver.find_element("xpath", "/html/body/div[1]/div/div[2]/form/input[1]")
-    final_date = driver.find_element("xpath", "/html/body/div[1]/div/div[2]/form/input[2]")
-
-    # Then we'll fake typing into it
-    beg_date.send_keys(start_date)
-    final_date.send_keys(end_date)
-
-    # Now we can grab the search button and click it
-    search_button = driver.find_element("xpath", "/html/body/div[1]/div/div[2]/form/input[4]")
-    search_button.click()
-
-    # show all records 
-    all_rows = driver.find_element("xpath", "/html/body/div[1]/div[3]/button")
-    all_rows.click()
+    previosly_scraped_cases = pd.read_csv(evictions_csv_path, parse_dates=['FILED DATE', 'LAST_UPDATED'])
+    cases_to_check = previosly_scraped_cases[
+        previosly_scraped_cases.DISPOSITION.isnull()]['CASE NUMBER'].to_list()
+    
+    most_recent_filing_date = previosly_scraped_cases['FILED DATE'].max().date()
+    
+    return previosly_scraped_cases, cases_to_check
 
 
-    return driver
-    #driver.quit()
+################ EVICTION SCRAPER CLASS ##############################
 
 class Eviction_Scraper:
-    """
-    scrapes eviction court cases from the Hamilton County
-    Clerk of Courts website, using "Selenium" and "Beautiful Soup" packages: 
-    https://www.courtclerk.org/records-search/municipal-civil-listing-by-classification/.
-    The result is either saved as a csv file or pandas df.
-    """
-    def __init__(self, start_date = "06/06/2022", end_date = "06/10/2022", webdriver_location = "/Users/oleksandrafilippova/Downloads/chromedriver"):
+    
+    def __init__(self, start_date = "06062022", end_date = "06102022", 
+        webdriver_location = "/Users/oleksandrafilippova/Downloads/chromedriver"):
 
         self.start_date = start_date
         self.end_date = end_date
+        self.lst_time_periods = self.__date_converter()
 
         self.eviction_cases = {
                 "CASE NUMBER": [], "COURT": [], "CASE CAPTION": [], "JUDGE": [], 
@@ -71,11 +42,36 @@ class Eviction_Scraper:
 
         # Initialize a Chrome webdriver and navigate to the starting webpage 
         chrome_options = Options()
-        #chrome_options.add_argument("--headless")
+        chrome_options.add_argument("--headless")
 
         self.driver = webdriver.Chrome(webdriver_location, options=chrome_options)
         self.driver.get("https://www.courtclerk.org/records-search/municipal-civil-listing-by-classification/")
         
+
+    def run_scraper(self):
+        """
+        Scrapes eviction court cases from the Hamilton County
+        Clerk of Courts website, using "Selenium" and "Beautiful Soup" packages: 
+        https://www.courtclerk.org/records-search/municipal-civil-listing-by-classification/.
+        The result is either saved as a csv file or pandas df.
+        """
+        for start, end in self.lst_time_periods:
+            self.__process_search_webpage(start, end)
+            # Show all records on one page 
+            self.driver.find_element("xpath", "/html/body/div[1]/div[3]/button").click() 
+            self.scrape_one_period()
+
+            self.driver.back()
+        
+        self.driver.quit()
+
+        df = pd.DataFrame.from_dict(self.eviction_cases)
+        df['LAST_UPDATED'] = dt.today().date()
+
+        return df
+
+
+#################### UTILITY METHODS #############################
 
     def __date_converter(self, max_period = 7):
         """
@@ -109,31 +105,18 @@ class Eviction_Scraper:
 
         lst_periods[-1][1] = end_date.strftime("%m/%d/%Y")
 
-        return lst_periods
+        return lst_periods    
 
 
-    def run_scraper(self):
-        """
-        Main function scraping eviction cases. 
-        
-        Returns pandas dataframe. 
-        """
-        self.__process_search_webpage()
-
-        # Show all records on one page 
-        self.driver.find_element("xpath", "/html/body/div[1]/div[3]/button").click()
+    def scrape_one_period(self):
 
         search_tab_handle = self.driver.current_window_handle
-
-        #records = self.driver.find_elements('xpath', '//*[@id="munciv_classlist_table"]/tbody/tr/td[1]')
-        #self.eviction_cases_list = [i.text for i in records]  # case ids
 
         # Create a list of links to case summary of all court records. 
         # td[5] specifies to use case summary, not case documents link
         records_xpath_list = self.driver.find_elements('xpath', "//td[5]/form")
 
-        for record in records_xpath_list[:5]:
-            
+        for record in records_xpath_list[:30]:
             record.click()
             
             # switch focus to the newly open tab to scrape data
@@ -155,19 +138,19 @@ class Eviction_Scraper:
             self.driver.close()
             self.driver.switch_to.window(search_tab_handle)
 
-            time.sleep(1)      
-
-        ###### NEED TO MOVE THIS ITEM UNDER MAIN FUNCTION ##########
-        self.pd_df = pd.DataFrame.from_dict(self.eviction_cases)  
-
-        # return to the search page
-        self.driver.back()
-
-        return self.driver
+            time.sleep(1)     
 
 
-    def __process_search_webpage(self):
+    def __process_search_webpage(self, start, end):
+        """
+        Processes search webpage by filling it out with classification code,
+        start & end date periods to query the court website.
 
+        Inputs:
+          start (str): start date following format 'mm/dd/yyyy'
+          end (str): end date following format 'mm/dd/yyyy'
+
+        """
         # Use selenium.webdriver.support.ui.Select that we imported above to grab the Select element
         Select(self.driver.find_element("name", "ccode")).select_by_value("G")
 
@@ -175,8 +158,10 @@ class Eviction_Scraper:
         final_date = self.driver.find_element('name','enddate')
 
         # Then we'll fake typing into it
-        beg_date.send_keys(self.start_date)
-        final_date.send_keys(self.end_date)
+        beg_date.clear()
+        beg_date.send_keys(start)
+        final_date.clear()
+        final_date.send_keys(end)
 
         # Now we can grab the search button and click it
         self.driver.find_element("xpath", "/html/body/div[1]/div/div[2]/form/input[4]").click()
@@ -244,3 +229,7 @@ class Eviction_Scraper:
                     self.eviction_cases["DEFENDANT_ATTORNEY"].append(row_fields[3])
                 else:
                     self.eviction_cases["DEFENDANT_ATTORNEY"].append("")
+
+
+if __name__ == '__main__':
+    pass 
