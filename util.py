@@ -1,4 +1,5 @@
 # imports
+from re import search
 import sys
 
 from typing_extensions import final
@@ -9,6 +10,7 @@ from selenium.webdriver.support.ui import Select    # for drop-down menu
 import time
 from datetime import datetime as dt, timedelta as tdelta
 import pandas as pd
+import numpy as np
 import math
 
 _EVICTION_CASES = {
@@ -20,7 +22,7 @@ _EVICTION_CASES = {
 _KEYS_LIST = [key for key in _EVICTION_CASES.keys()]
 
 
-def run_eviction_scraper(evictions_csv_path = None, start_date = "06062022", end_date = "06102022",
+def run_eviction_scraper(evictions_csv_path, start_date = "06062022", end_date = "06102022",
                             webdriver_location = "/Users/oleksandrafilippova/Downloads/chromedriver"):
     """
     Scrapes new eviction cases from the website. Updates cases with missing disposition.
@@ -32,16 +34,30 @@ def run_eviction_scraper(evictions_csv_path = None, start_date = "06062022", end
       webdriver_location (str): location of Chrome webdriver on the local machine.
     """
 
-    if evictions_csv_path is not None:
-        previosly_scraped_cases = pd.read_csv(evictions_csv_path, parse_dates=['FILED DATE', 'LAST_UPDATED'])
-        cases_to_check = previosly_scraped_cases[
-        previosly_scraped_cases.DISPOSITION.isnull()]['CASE NUMBER'].to_list()
-        most_recent_filing_date = previosly_scraped_cases['FILED DATE'].max().date()
-    
-    return previosly_scraped_cases, cases_to_check
+    if end_date is None:
+        end_date = dt.today().date().strftime("%m%d%Y")
+
+    try:
+        old_df = pd.read_csv(evictions_csv_path, parse_dates=['FILED DATE', 'LAST_UPDATED'])
+        cases_to_check = old_df[
+        old_df.DISPOSITION.isnull()]['CASE NUMBER'].to_list()
+        most_recent_filing_date = old_df['FILED DATE'].max().date()
+        if start_date is None:
+            start_date = (most_recent_filing_date + tdelta(days = 1)).strftime("%m%d%Y") 
+    except FileNotFoundError:
+            return 'Unable to open file from provided csv_path. Please try again'  
+
+    if start_date is None:
+        return 'Creating a brand new file. Please provide at least Start Date' 
 
     # initiate class
     eviction_scraper = Eviction_Scraper(start_date, end_date, webdriver_location)
+    new_df = eviction_scraper.run_scraper()
+
+    # master_df = old_df.append(new_df, ignore_index = True)
+    # master_df.to_csv(evictions_csv_path, index=False)
+    return old_df, new_df, cases_to_check
+
 
 ################ EVICTION SCRAPER CLASS ##############################
 
@@ -53,8 +69,7 @@ class Eviction_Scraper:
         self.start_date = start_date
         self.end_date = end_date
         self.lst_time_periods = self.__date_converter()
-
-        self.eviction_cases = _EVICTION_CASES
+        self.eviction_cases = _EVICTION_CASES.copy()
 
         # Initialize a Chrome webdriver and navigate to the starting webpage 
         chrome_options = Options()
@@ -80,8 +95,12 @@ class Eviction_Scraper:
         
         self.driver.quit()
 
-        df = pd.DataFrame.from_dict(self.eviction_cases)
+        df  = pd.DataFrame(self.eviction_cases)     
+        #df.set_index('CASE NUMBER', drop=True, inplace=True)
+        df['FILED DATE'] = pd.to_datetime(df["FILED DATE"]).dt.date
         df['LAST_UPDATED'] = dt.today().date()
+        df = df.replace(r'^\s*$', np.nan, regex=True)
+        df[['DISPOSITION_DATE','DISPOSITION']]=df.DISPOSITION.str.split(pat=' - ',expand=True)
 
         return df
 
@@ -105,7 +124,8 @@ class Eviction_Scraper:
         end_date = dt.strptime(self.end_date, "%m%d%Y").date()
 
         # check that start date is not before end date
-        assert start_date <= end_date
+        assert start_date <= end_date, 'Start Date is greater than End Date. Try again'
+        assert end_date <= dt.today().date(), "End Date is greater than today's date. Try again"
 
         number_batches = math.ceil((end_date  - start_date).days / max_period)
         end = start_date + tdelta(days = max_period)
@@ -135,7 +155,7 @@ class Eviction_Scraper:
         self.local_records = None
         self.local_records = {key: [None] * len(records_xpath_list) for key in _KEYS_LIST}
 
-        for i, record in enumerate(records_xpath_list[:7]):
+        for i, record in enumerate(records_xpath_list):
             record.click()
             
             # switch focus to the newly open tab to scrape data
@@ -257,6 +277,48 @@ class Eviction_Scraper:
         for key, val in party_info_dict.items():
             self.local_records[key][i] = val 
                 
+
+
+class Update_Eviction_Cases:
+
+    def __init__(self, cases_to_update_lst, df_to_update_in, 
+        webdriver_location = "/Users/oleksandrafilippova/Downloads/chromedriver"):
+
+        # Initialize a Chrome webdriver and navigate to the starting webpage 
+        chrome_options = Options()
+        #chrome_options.add_argument("--headless")
+
+        self.driver = webdriver.Chrome(webdriver_location, options=chrome_options)
+        self.driver.get("https://www.courtclerk.org/records-search/search-by-case-number/")
+
+        self.cases = cases_to_update_lst
+        self.df = df_to_update_in
+    
+    def update_cases(self):
+
+        for case_id in self.cases:
+            # enter case_id on the search page
+            self.driver.find_element('name', 'casenumber').clear().send_keys(case_id)
+            # find search button and click on it
+            self.driver.find_element('xpath', '/html/body/div[1]/div/div[2]/form/p/input[4]')
+
+            disposition_tag = self.driver.find_element('//*[@id="case_summary_table"]/tbody/tr[8]').text.upper()
+            
+            if 'DISPOSITION' in disposition_tag:
+                _, field_value = disposition_tag.split(":")
+                disposition_date, disposition = field_value.split('-')
+
+                self.df[self.df['CASE NUMBER'] == case_id]['DISPOSITION_DATE'] = disposition_date.strip()
+                self.df[self.df['CASE NUMBER'] == case_id]['DISPOSITION'] = disposition.strip()
+                self.df[self.df['CASE NUMBER'] == case_id]['LAST_UPDATED'] = dt.today().date()
+
+            # return on the search page
+            self.driver.back()
+        
+        return self.df
+
+
+
 
 # should be able to pass in start date (optional), end date (optional), path to csv if exists (optional),
 # webdriver location
